@@ -209,45 +209,6 @@
         padding: 10px 28px;
       }
     }
-
-    /* PRINT STYLES optimized for 58mm thermal paper (~2.3in) */
-    @media print {
-      body, html {
-        width: 58mm;
-        height: auto;
-        margin: 0;
-        padding: 0;
-        background: white;
-        color: black;
-        font-family: monospace, monospace;
-        font-size: 12pt;
-      }
-      .container, .result-card, h1, label, #printBtn, .message {
-        display: none !important;
-      }
-      .print-area {
-        display: block;
-        width: 54mm;
-        padding: 4mm 2mm;
-        color: black;
-      }
-      .print-area h1 {
-        font-size: 16pt;
-        margin-bottom: 6mm;
-        font-weight: bold;
-        text-align: center;
-      }
-      .print-area p {
-        margin: 4mm 0;
-        font-weight: bold;
-      }
-      /* Remove any shadows or colors */
-      * {
-        box-shadow: none !important;
-        color: black !important;
-        background: white !important;
-      }
-    }
   </style>
 </head>
 <body>
@@ -271,14 +232,6 @@
       <div class="result-item" data-num="3" id="amountOutput">Amount deposited: </div>
       <button type="button" id="printBtn" aria-label="Print summary">Print Summary</button>
     </section>
-
-    <!-- Hidden print area for thermal printer -->
-    <div id="printArea" class="print-area" aria-hidden="true" style="display:none;">
-      <h1>PhonePe Summary</h1>
-      <p id="printDate">Date: </p>
-      <p id="printCount">Number of transactions: </p>
-      <p id="printAmount">Amount deposited: </p>
-    </div>
   </main>
 
   <script>
@@ -300,10 +253,11 @@
       return { headers, data };
     }
 
-    // Find field keys for date and amount from headers heuristically
+    // Find field keys for date, type and amount from headers heuristically
     function detectFields(headers) {
       let dateKey = null;
       let amountKey = null;
+      let typeKey = null;
       for (const h of headers) {
         const lower = h.toLowerCase();
         if(!dateKey && (lower.includes("date") || lower.includes("transaction date"))) {
@@ -312,8 +266,11 @@
         if(!amountKey && (lower.includes("amount") || lower.includes("deposited") || lower.includes("credit")|| lower.includes("debit"))) {
           amountKey = lower;
         }
+        if(!typeKey && (lower.includes("type") || lower.includes("transaction type") || lower.includes("transaction category"))) {
+          typeKey = lower;
+        }
       }
-      return { dateKey, amountKey };
+      return { dateKey, amountKey, typeKey };
     }
 
     // Format date string to DD/MM/YYYY
@@ -331,16 +288,27 @@
       return num.toLocaleString('en-IN', { style: 'currency', currency: 'INR' });
     }
 
-    // Sum positive deposited amount only
-    function sumDeposits(data, amountKey) {
+    // Sum only received amounts (filter by transaction type or positive)
+    function sumReceived(data, amountKey, typeKey) {
       let sum = 0;
       for (const row of data) {
         const val = row[amountKey];
+        const typeVal = typeKey ? (row[typeKey] || '').toLowerCase() : '';
         if(!val) continue;
         // Remove non-numerics except dot and minus for parsing
         const num = parseFloat(val.replace(/[^0-9.-]+/g,''));
-        if(!isNaN(num) && num > 0) {
-          sum += num;
+        if(isNaN(num)) continue;
+        // Count amount only if transaction type indicates received, or amount positive
+        if(typeKey) {
+          // Check for received keywords: "received", "credit", "deposit"
+          if(typeVal.includes("received") || typeVal.includes("credit") || typeVal.includes("deposit") || typeVal.includes("add")) {
+            sum += num;
+          }
+        } else {
+          // If no type column assumed positive amounts are received
+          if(num > 0) {
+            sum += num;
+          }
         }
       }
       return sum;
@@ -354,13 +322,12 @@
     const amountOutput = document.getElementById('amountOutput');
     const printBtn = document.getElementById('printBtn');
 
-    // Print area elements
-    const printArea = document.getElementById('printArea');
-    const printDate = document.getElementById('printDate');
-    const printCount = document.getElementById('printCount');
-    const printAmount = document.getElementById('printAmount');
-
     let lastSummary = null;
+
+    // URL encode plain text string for RawBT print scheme
+    function urlEncodePrintText(str) {
+      return encodeURIComponent(str).replace(/'/g, "%27").replace(/"/g, "%22");
+    }
 
     fileInput.addEventListener('change', () => {
       result.hidden = true;
@@ -385,7 +352,7 @@
           const text = reader.result;
           const { headers, data } = parseCSV(text);
 
-          const { dateKey, amountKey } = detectFields(headers);
+          const { dateKey, amountKey, typeKey } = detectFields(headers);
           if(!dateKey || !amountKey) {
             message.textContent = "Unable to find Date or Amount columns in CSV.";
             return;
@@ -402,9 +369,9 @@
           // Number of transactions
           const count = data.length;
 
-          // Amount deposited summing positive amounts
-          const totalDeposited = sumDeposits(data, amountKey);
-          const amountFormatted = formatINR(totalDeposited);
+          // Sum only received amounts
+          const totalReceived = sumReceived(data, amountKey, typeKey);
+          const amountFormatted = formatINR(totalReceived);
 
           dateOutput.textContent = `Date: ${firstDateFormatted}`;
           countOutput.textContent = `Number of transactions: ${count}`;
@@ -418,8 +385,13 @@
             printBtn.classList.add('visible');
           }, 10);
 
-          // Save summary for printing
-          lastSummary = {date:firstDateFormatted, count, amount: amountFormatted};
+          // Save summary for printing including header "SOMESHWARA FRESH"
+          lastSummary = {
+            header: "SOMESHWARA FRESH",
+            date: firstDateFormatted,
+            count,
+            amount: amountFormatted
+          };
 
         } catch (e) {
           message.textContent = "Failed to parse CSV: " + e.message;
@@ -436,21 +408,25 @@
     printBtn.addEventListener("click", () => {
       if(!lastSummary) return;
 
-      // Update printArea content
-      printDate.textContent = `Date: ${lastSummary.date}`;
-      printCount.textContent = `Number of transactions: ${lastSummary.count}`;
-      printAmount.textContent = `Amount deposited: ${lastSummary.amount}`;
+      // Compose plain text summary with header, no extra text before header
+      const textToPrint = `
+${lastSummary.header}
+==============================
+1. Date: ${lastSummary.date}
+2. Number of transactions: ${lastSummary.count}
+3. Amount deposited: ${lastSummary.amount}
 
-      // Show printArea for printing
-      printArea.style.display = "block";
+Signature of Ram Seth
+`;
 
-      // Trigger print dialog
-      window.print();
+      // URL encode text for RawBT print URL scheme
+      const encodedText = urlEncodePrintText(textToPrint.trim());
 
-      // After printing hide printArea
-      setTimeout(() => {
-        printArea.style.display = "none";
-      }, 1000);
+      // RawBT print command using print?text= scheme with correct plain text
+      const rawbtUrl = `rawbt://print?text=${encodedText}`;
+
+      // Open RawBT app for printing
+      window.location.href = rawbtUrl;
     });
   </script>
 </body>
